@@ -105,10 +105,10 @@ export function writeFileAtomicSync(path, data, { mode, fsync = true } = {}) {
 }
 
 /** Writes JSON atomically, with a final newline. `space` defaults to 2. */
-export function writeJsonAtomic(path, value, { space = 2, ...options } = {}) {
+export async function writeJsonAtomic(path, value, { space = 2, ...options } = {}) {
   const text = JSON.stringify(value, null, space);
   if (text === undefined) throw new TypeError("atomic-file: the value cannot be written as JSON");
-  return writeFileAtomic(path, `${text}\n`, options);
+  await writeFileAtomic(path, `${text}\n`, options);
 }
 
 /**
