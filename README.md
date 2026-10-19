@@ -28,10 +28,11 @@ const state = await readJson("state.json", { fallback: { lastRun: 0 } });
 ## Details
 
 - `writeFileAtomic(path, data)` takes a string or bytes. `writeFileAtomicSync` is the synchronous twin.
-- The permissions of the file you replace are kept, or pass `{ mode }`.
+- The permissions of the file you replace are kept exactly (the umask does not reduce them), or pass `{ mode }`. A new file without `mode` gets 0o644 minus the umask. The owner of the file is not carried over.
+- A symbolic link is written through: the link stays and the file it points to is replaced.
 - On failure the old file is untouched and the temporary file is removed.
 - `fsync: false` skips the flushing when speed matters more than surviving a power cut.
-- `readJson` with `fallback` only covers a **missing** file. A file that exists but is not valid JSON always throws, with its path in the message, so a damaged state file is never silently replaced by defaults.
+- `readJson` ignores a byte order mark. `readJson` with `fallback` only covers a **missing** file. A file that exists but is not valid JSON always throws, with its path in the message, so a damaged state file is never silently replaced by defaults.
 - On Windows the rename is retried a few times when a virus scanner holds the file for a moment.
 - The temporary file lives in the same folder (it has to be on the same disk for the rename to be atomic), so that folder must be writable.
 

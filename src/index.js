@@ -1,9 +1,10 @@
-import { closeSync, constants, fsyncSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
-import { open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { closeSync, constants, fchmodSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { open, readFile, realpath, rename, stat, unlink } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { dirname, join, basename } from "node:path";
 
-const tempPath = (path) => join(dirname(path), `.${basename(path)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+// The file name is cut short so that a long name plus the suffix still fits in the 255 bytes most file systems allow.
+const tempPath = (path) => join(dirname(path), `.${Array.from(basename(path)).slice(0, 48).join("")}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
 const toBuffer = (data) => (typeof data === "string" ? Buffer.from(data, "utf8") : data instanceof Uint8Array ? data : null);
 
 function checkData(data) {
@@ -12,12 +13,23 @@ function checkData(data) {
   return buffer;
 }
 
+// Returns { mode, exact }: `exact` means the mode must be applied as given (it came from the caller or from the file being
+// replaced) and not be reduced by the umask. A new file without a mode gets 0o644 minus the umask, like a normal write.
 async function currentMode(path, mode) {
-  if (mode !== undefined) return mode;
+  if (mode !== undefined) return { mode, exact: true };
   try {
-    return (await stat(path)).mode & 0o7777;
+    return { mode: (await stat(path)).mode & 0o7777, exact: true };
   } catch {
-    return 0o644;
+    return { mode: 0o644, exact: false };
+  }
+}
+
+// A symbolic link is written through, so the link stays a link and the data lands in the file it points to.
+async function resolveTarget(path) {
+  try {
+    return await realpath(path);
+  } catch {
+    return path;
   }
 }
 
@@ -42,9 +54,12 @@ async function syncDirectory(path) {
  */
 export async function writeFileAtomic(path, data, { mode, fsync = true } = {}) {
   const buffer = checkData(data);
+  path = await resolveTarget(path);
   const temp = tempPath(path);
-  const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, await currentMode(path, mode));
+  const wanted = await currentMode(path, mode);
+  const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, wanted.mode);
   try {
+    if (wanted.exact && process.platform !== "win32") await handle.chmod(wanted.mode);
     await handle.writeFile(buffer);
     if (fsync) await handle.sync();
   } catch (error) {
@@ -77,17 +92,25 @@ async function renameWithRetry(from, to) {
 /** The synchronous version of `writeFileAtomic`. */
 export function writeFileAtomicSync(path, data, { mode, fsync = true } = {}) {
   const buffer = checkData(data);
+  try {
+    path = realpathSync(path);
+  } catch {
+    // Does not exist yet (or a dangling link): write to the path as given.
+  }
   const temp = tempPath(path);
   let useMode = mode;
+  let exact = mode !== undefined;
   if (useMode === undefined) {
     try {
       useMode = statSync(path).mode & 0o7777;
+      exact = true;
     } catch {
       useMode = 0o644;
     }
   }
   const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, useMode);
   try {
+    if (exact && process.platform !== "win32") fchmodSync(fd, useMode);
     writeSync(fd, buffer);
     if (fsync) fsyncSync(fd);
   } catch (error) {
@@ -97,10 +120,36 @@ export function writeFileAtomicSync(path, data, { mode, fsync = true } = {}) {
   }
   closeSync(fd);
   try {
-    renameSync(temp, path);
+    renameWithRetrySync(temp, path);
   } catch (error) {
     try { unlinkSync(temp); } catch { /* already gone */ }
     throw error;
+  }
+  if (fsync) syncDirectorySync(path);
+}
+
+function renameWithRetrySync(from, to) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return renameSync(from, to);
+    } catch (error) {
+      if (!["EPERM", "EACCES", "EBUSY"].includes(error.code) || attempt >= 5) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (attempt + 1));
+    }
+  }
+}
+
+function syncDirectorySync(path) {
+  if (process.platform === "win32") return;
+  try {
+    const fd = openSync(dirname(path), "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // Not every file system supports it; the rename itself has already happened.
   }
 }
 
@@ -109,6 +158,15 @@ export async function writeJsonAtomic(path, value, { space = 2, ...options } = {
   const text = JSON.stringify(value, null, space);
   if (text === undefined) throw new TypeError("atomic-file: the value cannot be written as JSON");
   await writeFileAtomic(path, `${text}\n`, options);
+}
+
+// A byte order mark (added by some Windows editors) is not part of the JSON text.
+function parseJson(text, path) {
+  try {
+    return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+  } catch (error) {
+    throw new SyntaxError(`atomic-file: ${path} is not valid JSON: ${error.message}`);
+  }
 }
 
 /**
@@ -123,11 +181,7 @@ export async function readJson(path, { fallback } = {}) {
     if (error.code === "ENOENT" && fallback !== undefined) return fallback;
     throw error;
   }
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    throw new SyntaxError(`atomic-file: ${path} is not valid JSON: ${error.message}`);
-  }
+  return parseJson(text, path);
 }
 
 /** The synchronous version of `readJson`. */
@@ -139,9 +193,5 @@ export function readJsonSync(path, { fallback } = {}) {
     if (error.code === "ENOENT" && fallback !== undefined) return fallback;
     throw error;
   }
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    throw new SyntaxError(`atomic-file: ${path} is not valid JSON: ${error.message}`);
-  }
+  return parseJson(text, path);
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -89,4 +90,73 @@ test("the synchronous version works too", () => {
   assert.equal(readFileSync(file, "utf8"), "sync");
   assert.throws(() => writeFileAtomicSync(file, 5), TypeError);
   assert.equal(existsSync(file), true);
+});
+
+const posix = process.platform === "win32" ? { skip: "POSIX permissions and symlinks" } : {};
+
+test("kept and requested permissions are exact, whatever the umask", posix, async () => {
+  const before = process.umask(0o022);
+  try {
+    const file = join(dir, "mode.txt");
+    writeFileSync(file, "x");
+    chmodSync(file, 0o664);
+    await writeFileAtomic(file, "y");
+    assert.equal(statSync(file).mode & 0o7777, 0o664);
+    writeFileAtomicSync(file, "z");
+    assert.equal(statSync(file).mode & 0o7777, 0o664);
+    const fresh = join(dir, "mode-new.txt");
+    await writeFileAtomic(fresh, "y", { mode: 0o666 });
+    assert.equal(statSync(fresh).mode & 0o7777, 0o666);
+    const fresh2 = join(dir, "mode-new2.txt");
+    writeFileAtomicSync(fresh2, "y", { mode: 0o660 });
+    assert.equal(statSync(fresh2).mode & 0o7777, 0o660);
+  } finally {
+    process.umask(before);
+  }
+});
+
+test("a symbolic link stays a link: the file it points to is replaced", posix, async () => {
+  const real = join(dir, "real.txt");
+  const link = join(dir, "link.txt");
+  writeFileSync(real, "old");
+  symlinkSync("real.txt", link);
+  await writeFileAtomic(link, "new");
+  assert.equal(lstatSync(link).isSymbolicLink(), true);
+  assert.equal(readFileSync(real, "utf8"), "new");
+  writeFileAtomicSync(link, "newer");
+  assert.equal(lstatSync(link).isSymbolicLink(), true);
+  assert.equal(readFileSync(real, "utf8"), "newer");
+});
+
+test("a very long file name still works (the temporary name is shortened)", async () => {
+  const file = join(dir, "n".repeat(240));
+  await writeFileAtomic(file, "long");
+  writeFileAtomicSync(file, "longer");
+  assert.equal(readFileSync(file, "utf8"), "longer");
+});
+
+test("readJson ignores a byte order mark", async () => {
+  const file = join(dir, "bom.json");
+  writeFileSync(file, "﻿{\"a\":1}");
+  assert.deepEqual(await readJson(file), { a: 1 });
+  assert.deepEqual(readJsonSync(file), { a: 1 });
+});
+
+test("a process killed in the middle of writing never leaves a mixed file", async () => {
+  const file = join(dir, "crash.bin");
+  const SIZE = 4 * 1024 * 1024;
+  writeFileSync(file, Buffer.alloc(SIZE, 0));
+  const child = `
+    import { writeFileAtomicSync } from ${JSON.stringify(new URL("./src/index.js", import.meta.url).href)};
+    for (let i = 1; ; i++) writeFileAtomicSync(process.argv[1], Buffer.alloc(${SIZE}, i % 250 + 1), { fsync: false });`;
+  for (let round = 0; round < 6; round++) {
+    const proc = spawn(process.execPath, ["--input-type=module", "-e", child, file], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 60 + round * 25));
+    proc.kill("SIGKILL");
+    await new Promise((r) => proc.on("close", r));
+    const bytes = readFileSync(file);
+    assert.equal(bytes.length, SIZE, "the file is complete");
+    assert.ok(bytes.every((b) => b === bytes[0]), "the file holds one version, not a mix");
+  }
+  for (const name of readdirSync(dir)) if (name.startsWith(".crash.bin.")) rmSync(join(dir, name));
 });
