@@ -83,8 +83,8 @@ async function renameWithRetry(from, to) {
       return await rename(from, to);
     } catch (error) {
       // Windows can refuse for a moment while a virus scanner or another reader has the target open.
-      if (!["EPERM", "EACCES", "EBUSY"].includes(error.code) || attempt >= 5) throw error;
-      await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+      if (!["EPERM", "EACCES", "EBUSY"].includes(error.code) || attempt >= 15) throw error;
+      await new Promise((r) => setTimeout(r, Math.min(10 * (attempt + 1), 100)));
     }
   }
 }
@@ -133,8 +133,8 @@ function renameWithRetrySync(from, to) {
     try {
       return renameSync(from, to);
     } catch (error) {
-      if (!["EPERM", "EACCES", "EBUSY"].includes(error.code) || attempt >= 5) throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 * (attempt + 1));
+      if (!["EPERM", "EACCES", "EBUSY"].includes(error.code) || attempt >= 15) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(10 * (attempt + 1), 100));
     }
   }
 }

@@ -33,7 +33,7 @@ const state = await readJson("state.json", { fallback: { lastRun: 0 } });
 - On failure the old file is untouched and the temporary file is removed.
 - `fsync: false` skips the flushing when speed matters more than surviving a power cut.
 - `readJson` ignores a byte order mark. `readJson` with `fallback` only covers a **missing** file. A file that exists but is not valid JSON always throws, with its path in the message, so a damaged state file is never silently replaced by defaults.
-- On Windows the rename is retried a few times when a virus scanner holds the file for a moment.
+- On Windows the rename is retried for about a second when a virus scanner or a busy reader holds the file (a reader that opens the file in a tight loop made the 0.3 s of the first version run out with EPERM).
 - The temporary file lives in the same folder (it has to be on the same disk for the rename to be atomic), so that folder must be writable.
 
 It makes a single file write safe. It does not make a read-modify-write cycle safe against another process doing the same: combine it with `@sandsoftwaresolutions/file-lock` for that.
