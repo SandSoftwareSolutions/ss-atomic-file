@@ -10,6 +10,8 @@ Write files so that nobody ever sees half of one, even if the power goes out in 
 npm install @sandsoftwaresolutions/atomic-file
 ```
 
+Works with `import` and `require()`, and ships TypeScript types for both.
+
 ## Usage
 
 ```js
